@@ -1,0 +1,13 @@
+{
+  "tokens": true,
+  "sessions": true,
+  "theme": "cozy",
+  "rotate_seconds": 0,
+  "hotkey": "Ctrl+Alt+F12",
+  "timepunch": {
+    "enabled": false,
+    "db": "%LOCALAPPDATA%\\TimePunchHelper\\ledger.db"
+  },
+  "brightness": 83,
+  "board": "cyd"
+}

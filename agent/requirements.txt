@@ -1,0 +1,5 @@
+pyserial>=3.5
+# nur für VibeCYD Studio (Tray-App)
+pystray>=0.19
+pillow>=10
+esptool>=4.8
