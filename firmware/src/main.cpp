@@ -110,6 +110,9 @@ struct State {
 struct Drawn {
   int screen = -1, dots = -1, brand = -1, theme = -1;
   bool full = false;  // Vollbild-Theme (eigener Rahmen statt Kopf- und Fußzeile)
+  bool search = false;  // Suchbildschirm (keine Verbindung zum Agent) ist zu sehen
+  String searchHint = "\x01";
+  int searchDots = -1;
   int gauges = 0;  // 0 = Gauges müssen komplett neu gezeichnet werden
   int pct[3] = {-2, -2, -2};
   String reset[3] = {"\x01", "\x01", "\x01"};
@@ -250,11 +253,6 @@ void drawStatic() {
   tft.drawFastHLine(12, 40, 296, C_TRACK);
 }
 
-void drawWaiting() {
-  textBox(10, 90, 300, 30, "Warte auf PC-Agent ...", &FreeSans9pt7b, C_MUTED);
-  textBox(10, 122, 300, 20, "python agent/vibecyd_agent.py", nullptr, C_TRACK);
-}
-
 // Ein Screen wird nur angeboten, wenn der Agent Daten dafür schickt.
 bool screenAvailable(int s) {
   if (s == SCREEN_SESSIONS) return st.ag.valid;
@@ -301,6 +299,7 @@ void drawCozyStatic(bool stale);
 extern uint16_t SY_BG, SY_PINK, SY_GRID, RT_GRAY, RT_NAVY, RT_DARK, CZ_UI_BG, CZ_UI_YELLOW, CZ_UI_TRACK;
 void renderCozy(uint32_t now, bool stale);
 void renderRetro(uint32_t now, bool stale);
+void renderSearch();
 
 // LED: aus = alles ok, gelb ab 75 %, rot ab 90 % (Session, Woche oder Fable) – auf allen Screens
 void updateLed(bool stale) {
@@ -322,9 +321,17 @@ void render() {
   bool stale = !st.everReceived || (millis() - st.lastMsgMs > STALE_AFTER_MS);
   uint32_t now = nowEpoch();
 
+  // Ohne Verbindung zum Agent sucht Clawd den PC – egal welches Theme eingestellt ist.
+  if (stale) {
+    renderSearch();
+    updateLed(true);
+    return;
+  }
+
   // Synthwave und Retro zeichnen den ganzen Bildschirm selbst, ohne Kopf- und Fußzeile.
   bool full = fullScreenTheme();
-  if (full != drawn.full || (full && (st.theme != drawn.theme || st.screen != drawn.screen))) {
+  if (drawn.search || full != drawn.full || (full && (st.theme != drawn.theme || st.screen != drawn.screen))) {
+    drawn.search = false;
     if (!full) drawStatic();  // normaler Rahmen: alles neu
     drawn.brand = drawn.dots = drawn.screen = drawn.theme = -1;
     drawn.plan = drawn.status = drawn.clock = drawn.footer = "\x01";
@@ -626,7 +633,14 @@ void renderSessions() {
 // Clawd ist ein Pixel-Krabbler (14 x 8 Pixel, Pixelgröße CL_P). Seine Laune hängt davon ab, wie viel
 // gerade los ist und wie knapp die Limits werden.
 
-enum Mood { MOOD_SLEEP, MOOD_BORED, MOOD_WORK, MOOD_BUSY, MOOD_TIGHT, MOOD_STRESS };
+enum Mood { MOOD_SLEEP, MOOD_BORED, MOOD_WORK, MOOD_BUSY, MOOD_TIGHT, MOOD_STRESS, MOOD_SEARCH };
+
+// Suchen: Clawd pendelt hin und her (-1..1) und schaut zur Seite, wenn er außen steht.
+float searchSwing(uint32_t t) { return sinf(t / 1100.0f); }
+int searchDir(uint32_t t) {
+  float s = searchSwing(t);
+  return s > 0.45f ? 1 : s < -0.45f ? -1 : 0;
+}
 
 const int CL_P = 6;                          // Größe eines Clawd-Pixels
 const int CL_SX = 100, CL_SY = 96, CL_SW = 120, CL_SH = 90;  // Sprite-Bereich auf dem Display
@@ -672,8 +686,9 @@ void drawClawdBody(int x0, int y0, Mood m, uint32_t t) {
   bool busy = m == MOOD_BUSY || m == MOOD_STRESS;
 
   // Beine: im Laufschritt abwechselnd angehoben
-  bool walking = busy || m == MOOD_WORK || m == MOOD_TIGHT;
-  int legPhase = (t / (busy ? 120 : 450)) % 2;
+  int dir = m == MOOD_SEARCH ? searchDir(t) : 0;
+  bool walking = busy || m == MOOD_WORK || m == MOOD_TIGHT || (m == MOOD_SEARCH && dir == 0);
+  int legPhase = (t / (busy ? 120 : m == MOOD_SEARCH ? 220 : 450)) % 2;
   const int legCols[4] = {3, 5, 8, 10};
   for (int i = 0; i < 4; i++) {
     int h = (walking && i % 2 == legPhase) ? P : 2 * P;
@@ -682,15 +697,20 @@ void drawClawdBody(int x0, int y0, Mood m, uint32_t t) {
 
   // Körper und Arme (bei Vollgas winken die Arme abwechselnd)
   spr.fillRect(x0 + 2 * P, y0, 10 * P, 6 * P, C_ORANGE);
+  // Beim Suchen hält er die Hand auf der Blickseite über die Augen.
   int wave = busy ? (t / 160) % 2 : -1;
-  spr.fillRect(x0, y0 + (wave == 0 ? 1 : 3) * P, 2 * P, P, C_ORANGE);
-  spr.fillRect(x0 + 12 * P, y0 + (wave == 1 ? 1 : 3) * P, 2 * P, P, C_ORANGE);
+  int rowL = (wave == 0 || dir == -1) ? (dir == -1 ? 0 : 1) : 3;
+  int rowR = (wave == 1 || dir == 1) ? (dir == 1 ? 0 : 1) : 3;
+  spr.fillRect(x0, y0 + rowL * P, 2 * P, P, C_ORANGE);
+  spr.fillRect(x0 + 12 * P, y0 + rowR * P, 2 * P, P, C_ORANGE);
 
   // Augen: offen, blinzelnd, halb zu (gelangweilt), zu (schläft) oder "> <" (Stress)
   int look = 0;
   if (m == MOOD_WORK || m == MOOD_TIGHT) {
     int phase = (t / 2600) % 4;  // schaut ab und zu nach links und rechts
     look = phase == 1 ? -P / 2 : phase == 3 ? P / 2 : 0;
+  } else if (m == MOOD_SEARCH) {
+    look = dir * (P * 3 / 4);
   }
   bool blink = (t % 3700) < 140;
   bool yawn = m == MOOD_BORED && (t % 9000) > 7600;
@@ -714,13 +734,13 @@ void drawClawdBody(int x0, int y0, Mood m, uint32_t t) {
   if (yawn) spr.fillRect(x0 + 6 * P, y0 + 4 * P - 2, 2 * P, P + 2, C_BG);  // Gähnen
 }
 
-void drawClawdAt(int px, int py, int w, int h, uint16_t bg, bool stale) {
+void drawClawdMood(int px, int py, int w, int h, uint16_t bg, Mood m) {
   if (!spr.createSprite(w, h)) return;
   spr.fillSprite(bg);
   uint32_t t = millis();
-  Mood m = currentMood(stale);
   int dx = 0, dy = 0;
   switch (m) {
+    case MOOD_SEARCH: dx = (int)roundf(18 * searchSwing(t)); break;            // läuft hin und her
     case MOOD_BUSY: dy = -(int)(fabsf(sinf(t / 140.0f)) * 7); break;          // hüpft
     case MOOD_STRESS: dx = (int)(t / 50 % 5) - 2; dy = -(int)(t / 70 % 3); break;  // zittert
     case MOOD_BORED: dx = (int)roundf(4 * sinf(t / 1300.0f)); break;         // schaukelt
@@ -728,10 +748,18 @@ void drawClawdAt(int px, int py, int w, int h, uint16_t bg, bool stale) {
     default: dy = (int)roundf(2 * sinf(t / 420.0f)); break;                    // wippt
   }
   int x0 = (w - 14 * CL_P) / 2 + dx, y0 = h - 60 + dy;
+  if (m == MOOD_SEARCH) spr.fillEllipse(x0 + 7 * CL_P, y0 + 8 * CL_P + 3, 5 * CL_P, 3, C_TRACK);  // Schatten
   drawClawdBody(x0, y0, m, t);
 
-  // Zzz beim Schlafen, Schweißtropfen wenn es knapp wird
-  if (m == MOOD_SLEEP) {
+  // Fragezeichen beim Suchen, Zzz beim Schlafen, Schweißtropfen wenn es knapp wird
+  if (m == MOOD_SEARCH) {
+    if (searchDir(t) == 0) {
+      spr.setTextFont(4);
+      spr.setTextColor(C_TEXT, bg);
+      spr.setTextDatum(BC_DATUM);
+      spr.drawString("?", x0 + 7 * CL_P, y0 - 4 - (int)(t / 120 % 4));
+    }
+  } else if (m == MOOD_SLEEP) {
     spr.setTextFont(2);
     spr.setTextColor(C_MUTED, bg);
     spr.setTextDatum(MC_DATUM);
@@ -749,7 +777,50 @@ void drawClawdAt(int px, int py, int w, int h, uint16_t bg, bool stale) {
   spr.deleteSprite();
 }
 
+void drawClawdAt(int px, int py, int w, int h, uint16_t bg, bool stale) {
+  drawClawdMood(px, py, w, h, bg, currentMood(stale));
+}
+
 void drawClawd(bool stale) { drawClawdAt(CL_SX, CL_SY, CL_SW, CL_SH, C_BG, stale); }
+
+// ---------- Keine Verbindung: Clawd sucht den PC ----------
+
+const int SR_X = 70, SR_Y = 50, SR_W = 180, SR_H = 112;  // Sprite-Bereich für den suchenden Clawd
+
+void drawSearchClawd() { drawClawdMood(SR_X, SR_Y, SR_W, SR_H, C_BG, MOOD_SEARCH); }
+
+void renderSearch() {
+  if (!drawn.search) {
+    drawStatic();
+    drawLogo(20, 20);
+    textBox(38, 6, 90, 28, "Claude", &FreeSansBold12pt7b, C_TEXT, ML_DATUM);
+    textBox(240, 10, 68, 22, "OFFLINE", nullptr, C_RED, MR_DATUM);
+    tft.fillSmoothCircle(308 - tft.textWidth("OFFLINE", 2) - 10, 21, 4, C_RED, C_BG);
+    drawSearchClawd();
+    drawn.search = true;
+    drawn.searchHint = "\x01";
+    drawn.searchDots = -1;
+    drawn.screen = drawn.theme = -1;  // beim Wiederverbinden alles neu zeichnen
+  }
+
+  // "Warte auf PC-Agent" mit 0–3 Punkten; linksbündig ab fester Stelle, damit der Text nicht springt
+  int dots = millis() / 1000 % 4;
+  if (dots != drawn.searchDots) {
+    tft.setFreeFont(&FreeSans9pt7b);
+    int x = 160 - tft.textWidth("Warte auf PC-Agent ...") / 2;
+    textBox(x, 168, 320 - 2 * x + 8, 24, String("Warte auf PC-Agent ") + String("...").substring(0, dots),
+            &FreeSans9pt7b, C_TEXT, ML_DATUM);
+    drawn.searchDots = dots;
+  }
+
+  String hint = st.everReceived
+                    ? "Verbindung weg seit " + fmtDur((millis() - st.lastMsgMs) / 1000)
+                    : String("VibeCYD Studio am PC starten");
+  if (hint != drawn.searchHint) {
+    textBox(4, 198, 312, 18, hint, nullptr, C_MUTED);
+    drawn.searchHint = hint;
+  }
+}
 
 #include "themes.h"
 #include "themes_cozy_clippy.h"
@@ -945,8 +1016,6 @@ void setup() {
   ts.begin(touchSpi);
 
   spr.setColorDepth(16);
-  drawStatic();
-  drawWaiting();
   render();
   Serial.println("VIBECYD 1");
 }
@@ -973,10 +1042,11 @@ void loop() {
     drawMarquee(false);
   }
   static uint32_t lastAnim = 0;
-  if (drawn.screen == SCREEN_LIMITS && millis() - lastAnim >= 70) {
+  if ((drawn.search || drawn.screen == SCREEN_LIMITS) && millis() - lastAnim >= 70) {
     lastAnim = millis();
     bool stale = millis() - st.lastMsgMs > STALE_AFTER_MS;
-    if (drawn.theme == THEME_CLAWD) drawClawd(stale);
+    if (drawn.search) drawSearchClawd();
+    else if (drawn.theme == THEME_CLAWD) drawClawd(stale);
     else if (drawn.theme == THEME_BATTERY) animateBattery();
     else if (drawn.theme == THEME_SYNTH) animateSynth(nowEpoch(), stale);
     else if (drawn.theme == THEME_RETRO) drawClawdAt(14, 32, 116, 88, RT_GRAY, stale);
